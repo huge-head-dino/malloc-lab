@@ -60,10 +60,9 @@ team_t team = {
 
 // *️⃣ 변수 선언 
 static char *heap_listp; // 프롤로그 사이를 가리키는 놈이다. (클래스의 시작)
-static char *last_bp;
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
-static void *next_fit(size_t a_size);
+static void *find_fit(size_t a_size);
 static void place(void *bp, size_t a_size);
 
 
@@ -92,19 +91,19 @@ int mm_init(void)
 // 1. 힙이 초기화 될 때
 // 2. mm_malloc이 적당한 맞춤 fit을 찾지 못했을 때
 
-static void *extend_heap(size_t words) 
+static void *extend_heap(size_t words)
 {
-    char * bp;                  // 포인터
-    size_t size;                // size_t라는 구조체 형태를 띠는 size 선언
+    char * bp;
+    size_t size;
+    /* allocate an even number of words to maintain alignment*/
+    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE; // words가 
+    if ((long)(bp = mem_sbrk(size))== -1) 
+        return NULL;
     
-    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE; // words를 2로 나눴을 때 나머지에 WSIZE를 곱한다.
-    if ((long)(bp = mem_sbrk(size))== -1)  // sbrk 명령으로 heap사이즈를 늘렸을 때 음수가 나온다면
-        return NULL;                       // NULL 반환
-    
-    /* Initialize   free block header footer and the epilogue header */
-    PUT(HDRP(bp), PACK(size,0));         // 가용 메모리 블록의 헤더 = 해당 블록의 크기 및 할당여부 정보 저장
-    PUT(FTRP(bp), PACK(size,0));         // 풋터는 가용블록과 동일한 정보를 가지지만 블록 마지막에 위치
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1)); // PUT매크로 함수는 p와 val을 블록에 저장하고, PACK함수는 주어진 두 개의 인수를 결합한다.
+    /* Initialize free block header footer and the epilogue header */
+    PUT(HDRP(bp), PACK(size,0));
+    PUT(FTRP(bp), PACK(size,0));
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1));
 
     /* Coalesce if the previous block was free*/
     return coalesce(bp);
@@ -118,7 +117,6 @@ static void *coalesce(void *bp) {
 
     // case1: 앞, 뒤 블록 모두 할당되어 있을 때
     if (prev_alloc && next_alloc) {
-        last_bp = bp;
         return bp;
     }
 
@@ -144,7 +142,6 @@ static void *coalesce(void *bp) {
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
-    last_bp = bp;
     return bp;
 }
 
@@ -168,7 +165,7 @@ void mm_free(void *bp)
 void *mm_malloc(size_t size)
 {
     size_t asize;       //할당할 블록 사이즈
-    size_t extendsize;  //만약 맞는게 없다면 확장할 사이즈 
+    size_t extendsize;  //확장할 사이즈 
     char *bp;
 
     // size가 0이거나 0보다 작으면 할당하지 않는다(잘못된 요청을 거르는 곳)
@@ -191,11 +188,9 @@ void *mm_malloc(size_t size)
 
 
     // 적절한 가용(free)블록을 가용리스트에서 검색
-    if((bp = next_fit(asize))!=NULL){
+    if((bp = find_fit(asize))!=NULL){
         place(bp,asize); // 할당
         return bp;       // 새로 할당된 블록의 포인터를 리턴해준다
-        last_bp = bp;
-        return bp;
     }
 
     //적당한 블록이 없을 경우에는 sbrk 명령으로 힙확장
@@ -203,33 +198,31 @@ void *mm_malloc(size_t size)
     if((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
     place(bp,asize);
-    last_bp = bp;
     return bp;
 }
 
-static void *next_fit(size_t adjusted_size) {
-    char *bp = last_bp;
+static void *find_fit(size_t a_size) {
+    void *bp;
 
-    // 가용 블록의 크기가 asize보다 작다면 할당, 근데 이전에 할당한 블록 다음부터
-    for (bp = NEXT_BLKP(bp); GET_SIZE(HDRP(bp)) != 0; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= adjusted_size) {
-            last_bp = bp;
+    for (bp = (char *)heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (a_size <= GET_SIZE(HDRP(bp)))) {
             return bp;
         }
     }
-    // 바로 이전에 할당한 블록 다음부터 조사하여 찾지 못했다면 맨 앞에서부터 다시 탐색
-    bp = heap_listp;
-    while (bp < last_bp) {
-        bp = NEXT_BLKP(bp);
-        if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= adjusted_size) {
-            last_bp = bp;
-            return bp;
-        }
-    }
-
-    return NULL;
+    return NULL;    // NO fit
 }
 
+// static void *find_fit(size_t a_size) {
+//     char *bp = heap_listp;
+//     bp = NEXT_BLKP(bp);
+//     while (GET_SIZE(HDRP(bp)) < a_size || GET_ALLOC(HDRP(bp)) == 1) {   // bp가 적용될 블록의 크기보다 작고, free일 때
+//         bp = NEXT_BLKP(bp);
+//         if (GET_SIZE(HDRP(bp)) == 0) {      // Epilogue를 만났을 때
+//             return NULL;
+//         }
+//     }
+//     return bp;
+// }
 
 static void place(void *bp, size_t a_size) {
     size_t c_size = GET_SIZE(HDRP(bp));
